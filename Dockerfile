@@ -6,6 +6,7 @@ ENV PATH=/usr/local/cuda/bin:${PATH}
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 
 COPY patches/ffmpeg-npp-cuda13.patch /tmp/ffmpeg-npp-cuda13.patch
+COPY patches/ffmpeg-tonemap-cuda.patch /tmp/ffmpeg-tonemap-cuda.patch
 
 # Install build dependencies
 # We explicitly install cuda-libraries-dev-13-0 (for libnpp-dev, etc.)
@@ -39,7 +40,9 @@ RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
 WORKDIR /tmp/ffmpeg_build
 RUN wget -O ffmpeg.tar.bz2 https://ffmpeg.org/releases/ffmpeg-7.1.3.tar.bz2 && \
     tar xjvf ffmpeg.tar.bz2 && \
-    patch -p0 < /tmp/ffmpeg-npp-cuda13.patch
+    patch -p0 < /tmp/ffmpeg-npp-cuda13.patch && \
+    cd ffmpeg-7.1.3 && \
+    patch -p0 < /tmp/ffmpeg-tonemap-cuda.patch
 
 # Compile FFmpeg
 # We use variables to ensure shell quoting is handled cleanly.
