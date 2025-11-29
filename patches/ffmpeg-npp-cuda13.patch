@@ -1,0 +1,385 @@
+diff -ru ffmpeg-7.1.3.orig/configure ffmpeg-7.1.3/configure
+--- ffmpeg-7.1.3.orig/configure	2025-11-21 02:15:18.000000000 +0100
++++ ffmpeg-7.1.3/configure	2025-11-29 09:05:54.772523539 +0100
+@@ -6772,7 +6772,10 @@
+ fi
+ 
+ if enabled cuda_nvcc; then
+-    nvccflags="$nvccflags -ptx"
++    nvcc_version=$($nvcc --version 2>&1 | sed -n 's/.*release \([0-9]\+\).*/\1/p' | head -n 1)
++    if [ -n "$nvcc_version" ] && [ "$nvcc_version" -lt 13 ]; then
++        nvccflags="$nvccflags -ptx"
++    fi
+ else
+     nvccflags="$nvccflags -S -nocudalib -nocudainc --cuda-device-only -Wno-c++11-narrowing -include ${source_link}/compat/cuda/cuda_runtime.h"
+     check_nvcc cuda_llvm
+diff -ru ffmpeg-7.1.3.orig/libavfilter/vf_scale_npp.c ffmpeg-7.1.3/libavfilter/vf_scale_npp.c
+--- ffmpeg-7.1.3.orig/libavfilter/vf_scale_npp.c	2025-11-21 02:15:18.000000000 +0100
++++ ffmpeg-7.1.3/libavfilter/vf_scale_npp.c	2025-11-29 09:10:57.207921248 +0100
+@@ -22,6 +22,7 @@
+  */
+ 
+ #include <nppi.h>
++#include <cuda_runtime_api.h>
+ #include <stdio.h>
+ #include <string.h>
+ 
+@@ -43,6 +44,52 @@
+ 
+ #define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, device_hwctx->internal->cuda_dl, x)
+ 
++static int npp_cuda_runtime_error(AVFilterContext *ctx, const char *func,
++                                  cudaError_t err)
++{
++    if (err == cudaSuccess)
++        return 0;
++
++    av_log(ctx, AV_LOG_ERROR, "%s failed: %s\n", func, cudaGetErrorString(err));
++    return AVERROR_EXTERNAL;
++}
++
++static int npp_fill_stream_context(AVFilterContext *ctx,
++                                   AVCUDADeviceContext *device_hwctx,
++                                   NppStreamContext *stream_ctx)
++{
++    cudaError_t err;
++    struct cudaDeviceProp prop;
++    int device;
++    unsigned flags;
++    int ret;
++
++    err = cudaStreamGetFlags(device_hwctx->stream, &flags);
++    if ((ret = npp_cuda_runtime_error(ctx, "cudaStreamGetFlags", err)) < 0)
++        return ret;
++
++    err = cudaGetDevice(&device);
++    if ((ret = npp_cuda_runtime_error(ctx, "cudaGetDevice", err)) < 0)
++        return ret;
++
++    err = cudaGetDeviceProperties(&prop, device);
++    if ((ret = npp_cuda_runtime_error(ctx, "cudaGetDeviceProperties", err)) < 0)
++        return ret;
++
++    stream_ctx->hStream = device_hwctx->stream;
++    stream_ctx->nCudaDeviceId = device;
++    stream_ctx->nMultiProcessorCount = prop.multiProcessorCount;
++    stream_ctx->nMaxThreadsPerMultiProcessor = prop.maxThreadsPerMultiProcessor;
++    stream_ctx->nMaxThreadsPerBlock = prop.maxThreadsPerBlock;
++    stream_ctx->nSharedMemPerBlock = prop.sharedMemPerBlock;
++    stream_ctx->nCudaDevAttrComputeCapabilityMajor = prop.major;
++    stream_ctx->nCudaDevAttrComputeCapabilityMinor = prop.minor;
++    stream_ctx->nStreamFlags = flags;
++    stream_ctx->nReserved0 = 0;
++
++    return 0;
++}
++
+ static const enum AVPixelFormat supported_formats[] = {
+     AV_PIX_FMT_YUV420P,
+     AV_PIX_FMT_YUVA420P,
+@@ -171,6 +218,7 @@
+     double var_values[VARS_NB];
+ 
+     int eval_mode;
++    NppStreamContext stream_ctx;
+ } NPPScaleContext;
+ 
+ const AVFilter ff_vf_scale2ref_npp;
+@@ -708,14 +756,16 @@
+                                  AVFrame *out, AVFrame *in)
+ {
+     AVHWFramesContext *in_frames_ctx = (AVHWFramesContext*)in->hw_frames_ctx->data;
++    NPPScaleContext *s = ctx->priv;
+     NppStatus err;
+ 
+     switch (in_frames_ctx->sw_format) {
+     case AV_PIX_FMT_NV12:
+-        err = nppiYCbCr420_8u_P2P3R(in->data[0], in->linesize[0],
++        err = nppiYCbCr420_8u_P2P3R_Ctx(in->data[0], in->linesize[0],
+                                     in->data[1], in->linesize[1],
+                                     out->data, out->linesize,
+-                                    (NppiSize){ in->width, in->height });
++                                    (NppiSize){ in->width, in->height },
++                                    s->stream_ctx);
+         break;
+     default:
+         return AVERROR_BUG;
+@@ -741,12 +791,13 @@
+         int ow = stage->planes_out[i].width;
+         int oh = stage->planes_out[i].height;
+ 
+-        err = nppiResizeSqrPixel_8u_C1R(in->data[i], (NppiSize){ iw, ih },
+-                                        in->linesize[i], (NppiRect){ 0, 0, iw, ih },
+-                                        out->data[i], out->linesize[i],
+-                                        (NppiRect){ 0, 0, ow, oh },
+-                                        (double)ow / iw, (double)oh / ih,
+-                                        0.0, 0.0, s->interp_algo);
++        err = nppiResizeSqrPixel_8u_C1R_Ctx(in->data[i], (NppiSize){ iw, ih },
++                                            in->linesize[i], (NppiRect){ 0, 0, iw, ih },
++                                            out->data[i], out->linesize[i],
++                                            (NppiRect){ 0, 0, ow, oh },
++                                            (double)ow / iw, (double)oh / ih,
++                                            0.0, 0.0, s->interp_algo,
++                                            s->stream_ctx);
+         if (err != NPP_SUCCESS) {
+             av_log(ctx, AV_LOG_ERROR, "NPP resize error: %d\n", err);
+             return AVERROR_UNKNOWN;
+@@ -760,15 +811,17 @@
+                                AVFrame *out, AVFrame *in)
+ {
+     AVHWFramesContext *out_frames_ctx = (AVHWFramesContext*)out->hw_frames_ctx->data;
++    NPPScaleContext *s = ctx->priv;
+     NppStatus err;
+ 
+     switch (out_frames_ctx->sw_format) {
+     case AV_PIX_FMT_NV12:
+-        err = nppiYCbCr420_8u_P3P2R((const uint8_t**)in->data,
+-                                    in->linesize,
+-                                    out->data[0], out->linesize[0],
+-                                    out->data[1], out->linesize[1],
+-                                    (NppiSize){ in->width, in->height });
++        err = nppiYCbCr420_8u_P3P2R_Ctx((const Npp8u * const *)in->data,
++                                        in->linesize,
++                                        out->data[0], out->linesize[0],
++                                        out->data[1], out->linesize[1],
++                                        (NppiSize){ in->width, in->height },
++                                        s->stream_ctx);
+         break;
+     default:
+         return AVERROR_BUG;
+@@ -926,8 +979,13 @@
+     if (ret < 0)
+         goto fail;
+ 
++    ret = npp_fill_stream_context(ctx, device_hwctx, &s->stream_ctx);
++    if (ret < 0)
++        goto pop_ctx;
++
+     ret = nppscale_scale(link, out, in);
+ 
++pop_ctx:
+     CHECK_CU(device_hwctx->internal->cuda_dl->cuCtxPopCurrent(&dummy));
+     if (ret < 0)
+         goto fail;
+diff -ru ffmpeg-7.1.3.orig/libavfilter/vf_sharpen_npp.c ffmpeg-7.1.3/libavfilter/vf_sharpen_npp.c
+--- ffmpeg-7.1.3.orig/libavfilter/vf_sharpen_npp.c	2025-11-21 02:15:18.000000000 +0100
++++ ffmpeg-7.1.3/libavfilter/vf_sharpen_npp.c	2025-11-29 09:10:43.360998435 +0100
+@@ -23,6 +23,7 @@
+ 
+ #include <nppi.h>
+ #include <nppi_filtering_functions.h>
++#include <cuda_runtime_api.h>
+ 
+ #include "filters.h"
+ #include "libavutil/pixdesc.h"
+@@ -34,6 +35,52 @@
+ 
+ #define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, device_hwctx->internal->cuda_dl, x)
+ 
++static int npp_cuda_runtime_error(AVFilterContext *ctx, const char *func,
++                                  cudaError_t err)
++{
++    if (err == cudaSuccess)
++        return 0;
++
++    av_log(ctx, AV_LOG_ERROR, "%s failed: %s\n", func, cudaGetErrorString(err));
++    return AVERROR_EXTERNAL;
++}
++
++static int npp_fill_stream_context(AVFilterContext *ctx,
++                                   AVCUDADeviceContext *device_hwctx,
++                                   NppStreamContext *stream_ctx)
++{
++    cudaError_t err;
++    struct cudaDeviceProp prop;
++    int device;
++    unsigned flags;
++    int ret;
++
++    err = cudaStreamGetFlags(device_hwctx->stream, &flags);
++    if ((ret = npp_cuda_runtime_error(ctx, "cudaStreamGetFlags", err)) < 0)
++        return ret;
++
++    err = cudaGetDevice(&device);
++    if ((ret = npp_cuda_runtime_error(ctx, "cudaGetDevice", err)) < 0)
++        return ret;
++
++    err = cudaGetDeviceProperties(&prop, device);
++    if ((ret = npp_cuda_runtime_error(ctx, "cudaGetDeviceProperties", err)) < 0)
++        return ret;
++
++    stream_ctx->hStream = device_hwctx->stream;
++    stream_ctx->nCudaDeviceId = device;
++    stream_ctx->nMultiProcessorCount = prop.multiProcessorCount;
++    stream_ctx->nMaxThreadsPerMultiProcessor = prop.maxThreadsPerMultiProcessor;
++    stream_ctx->nMaxThreadsPerBlock = prop.maxThreadsPerBlock;
++    stream_ctx->nSharedMemPerBlock = prop.sharedMemPerBlock;
++    stream_ctx->nCudaDevAttrComputeCapabilityMajor = prop.major;
++    stream_ctx->nCudaDevAttrComputeCapabilityMinor = prop.minor;
++    stream_ctx->nStreamFlags = flags;
++    stream_ctx->nReserved0 = 0;
++
++    return 0;
++}
++
+ static const enum AVPixelFormat supported_formats[] = {
+     AV_PIX_FMT_YUV420P,
+     AV_PIX_FMT_YUV444P,
+@@ -47,6 +94,7 @@
+     AVFrame* tmp_frame;
+ 
+     NppiBorderType border_type;
++    NppStreamContext stream_ctx;
+ } NPPSharpenContext;
+ 
+ static int nppsharpen_init(AVFilterContext* ctx)
+@@ -165,9 +213,10 @@
+         int ow = AV_CEIL_RSHIFT(in->width, (i == 1 || i == 2) ? desc->log2_chroma_w : 0);
+         int oh = AV_CEIL_RSHIFT(in->height, (i == 1 || i == 2) ? desc->log2_chroma_h : 0);
+ 
+-        NppStatus err = nppiFilterSharpenBorder_8u_C1R(
++        NppStatus err = nppiFilterSharpenBorder_8u_C1R_Ctx(
+             in->data[i], in->linesize[i], (NppiSize){ow, oh}, (NppiPoint){0, 0},
+-            out->data[i], out->linesize[i], (NppiSize){ow, oh}, s->border_type);
++            out->data[i], out->linesize[i], (NppiSize){ow, oh}, s->border_type,
++            s->stream_ctx);
+         if (err != NPP_SUCCESS) {
+             av_log(ctx, AV_LOG_ERROR, "NPP sharpen error: %d\n", err);
+             return AVERROR_EXTERNAL;
+@@ -202,6 +251,10 @@
+     if (ret < 0)
+         goto fail;
+ 
++    ret = npp_fill_stream_context(ctx, device_hwctx, &s->stream_ctx);
++    if (ret < 0)
++        goto pop_ctx;
++
+     ret = nppsharpen_sharpen(ctx, s->own_frame, in);
+     if (ret < 0)
+         goto pop_ctx;
+diff -ru ffmpeg-7.1.3.orig/libavfilter/vf_transpose_npp.c ffmpeg-7.1.3/libavfilter/vf_transpose_npp.c
+--- ffmpeg-7.1.3.orig/libavfilter/vf_transpose_npp.c	2025-11-21 02:15:18.000000000 +0100
++++ ffmpeg-7.1.3/libavfilter/vf_transpose_npp.c	2025-11-29 09:18:07.362668495 +0100
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include <nppi.h>
++#include <cuda_runtime_api.h>
+ #include <stdio.h>
+ #include <string.h>
+ 
+@@ -35,6 +36,52 @@
+ 
+ #define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, device_hwctx->internal->cuda_dl, x)
+ 
++static int npp_cuda_runtime_error(AVFilterContext *ctx, const char *func,
++                                  cudaError_t err)
++{
++    if (err == cudaSuccess)
++        return 0;
++
++    av_log(ctx, AV_LOG_ERROR, "%s failed: %s\n", func, cudaGetErrorString(err));
++    return AVERROR_EXTERNAL;
++}
++
++static int npp_fill_stream_context(AVFilterContext *ctx,
++                                   AVCUDADeviceContext *device_hwctx,
++                                   NppStreamContext *stream_ctx)
++{
++    cudaError_t err;
++    struct cudaDeviceProp prop;
++    int device;
++    unsigned flags;
++    int ret;
++
++    err = cudaStreamGetFlags(device_hwctx->stream, &flags);
++    if ((ret = npp_cuda_runtime_error(ctx, "cudaStreamGetFlags", err)) < 0)
++        return ret;
++
++    err = cudaGetDevice(&device);
++    if ((ret = npp_cuda_runtime_error(ctx, "cudaGetDevice", err)) < 0)
++        return ret;
++
++    err = cudaGetDeviceProperties(&prop, device);
++    if ((ret = npp_cuda_runtime_error(ctx, "cudaGetDeviceProperties", err)) < 0)
++        return ret;
++
++    stream_ctx->hStream = device_hwctx->stream;
++    stream_ctx->nCudaDeviceId = device;
++    stream_ctx->nMultiProcessorCount = prop.multiProcessorCount;
++    stream_ctx->nMaxThreadsPerMultiProcessor = prop.maxThreadsPerMultiProcessor;
++    stream_ctx->nMaxThreadsPerBlock = prop.maxThreadsPerBlock;
++    stream_ctx->nSharedMemPerBlock = prop.sharedMemPerBlock;
++    stream_ctx->nCudaDevAttrComputeCapabilityMajor = prop.major;
++    stream_ctx->nCudaDevAttrComputeCapabilityMinor = prop.minor;
++    stream_ctx->nStreamFlags = flags;
++    stream_ctx->nReserved0 = 0;
++
++    return 0;
++}
++
+ static const enum AVPixelFormat supported_formats[] = {
+     AV_PIX_FMT_YUV420P,
+     AV_PIX_FMT_YUV444P
+@@ -77,6 +124,7 @@
+     AVFrame *tmp_frame;
+ 
+     int passthrough;    ///< PassthroughType, landscape passthrough mode enabled
++    NppStreamContext stream_ctx;
+     int dir;            ///< TransposeDir
+ } NPPTransposeContext;
+ 
+@@ -309,11 +357,12 @@
+         int shiftw = (s->dir == NPP_TRANSPOSE_CLOCK  || s->dir == NPP_TRANSPOSE_CLOCK_FLIP) ? ow - 1 : 0;
+         int shifth = (s->dir == NPP_TRANSPOSE_CCLOCK || s->dir == NPP_TRANSPOSE_CLOCK_FLIP) ? oh - 1 : 0;
+ 
+-        err = nppiRotate_8u_C1R(in->data[i], (NppiSize){ iw, ih },
+-                                in->linesize[i], (NppiRect){ 0, 0, iw, ih },
+-                                out->data[i], out->linesize[i],
+-                                (NppiRect){ 0, 0, ow, oh },
+-                                angle, shiftw, shifth, NPPI_INTER_NN);
++        err = nppiRotate_8u_C1R_Ctx(in->data[i], (NppiSize){ iw, ih },
++                                    in->linesize[i], (NppiRect){ 0, 0, iw, ih },
++                                    out->data[i], out->linesize[i],
++                                    (NppiRect){ 0, 0, ow, oh },
++                                    angle, shiftw, shifth, NPPI_INTER_NN,
++                                    s->stream_ctx);
+         if (err != NPP_SUCCESS) {
+             av_log(ctx, AV_LOG_ERROR, "NPP rotate error: %d\n", err);
+             return AVERROR_UNKNOWN;
+@@ -326,6 +375,7 @@
+ static int npptranspose_transpose(AVFilterContext *ctx, NPPTransposeStageContext *stage,
+                                   AVFrame *out, AVFrame *in)
+ {
++    NPPTransposeContext *s = ctx->priv;
+     NppStatus err;
+     int i;
+ 
+@@ -333,9 +383,10 @@
+         int iw = stage->planes_in[i].width;
+         int ih = stage->planes_in[i].height;
+ 
+-        err = nppiTranspose_8u_C1R(in->data[i], in->linesize[i],
+-                                   out->data[i], out->linesize[i],
+-                                   (NppiSize){ iw, ih });
++        err = nppiTranspose_8u_C1R_Ctx(in->data[i], in->linesize[i],
++                                       out->data[i], out->linesize[i],
++                                       (NppiSize){ iw, ih },
++                                       s->stream_ctx);
+         if (err != NPP_SUCCESS) {
+             av_log(ctx, AV_LOG_ERROR, "NPP transpose error: %d\n", err);
+             return AVERROR_UNKNOWN;
+@@ -411,8 +462,13 @@
+     if (ret < 0)
+         goto fail;
+ 
++    ret = npp_fill_stream_context(ctx, device_hwctx, &s->stream_ctx);
++    if (ret < 0)
++        goto pop_ctx;
++
+     ret = npptranspose_filter(ctx, out, in);
+ 
++pop_ctx:
+     CHECK_CU(device_hwctx->internal->cuda_dl->cuCtxPopCurrent(&dummy));
+     if (ret < 0)
+         goto fail;

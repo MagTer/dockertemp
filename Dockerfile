@@ -5,6 +5,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/usr/local/cuda/bin:${PATH}
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 
+COPY patches/ffmpeg-npp-cuda13.patch /tmp/ffmpeg-npp-cuda13.patch
+COPY patches/ffmpeg-tonemap-cuda.patch /tmp/ffmpeg-tonemap-cuda.patch
+
 # Install build dependencies
 # We explicitly install cuda-libraries-dev-13-0 (for libnpp-dev, etc.)
 # AND cuda-cudart-dev-13-0 (for cuda_runtime.h and static linking)
@@ -25,7 +28,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cuda-libraries-dev-13-0 \
     cuda-cudart-dev-13-0 \
     cuda-nvcc-13-0 \
-    cuda-headers-13-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install nv-codec-headers
@@ -37,7 +39,10 @@ RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
 # Download FFmpeg
 WORKDIR /tmp/ffmpeg_build
 RUN wget -O ffmpeg.tar.bz2 https://ffmpeg.org/releases/ffmpeg-7.1.3.tar.bz2 && \
-    tar xjvf ffmpeg.tar.bz2
+    tar xjvf ffmpeg.tar.bz2 && \
+    patch -p0 < /tmp/ffmpeg-npp-cuda13.patch && \
+    cd ffmpeg-7.1.3 && \
+    patch -p0 < /tmp/ffmpeg-tonemap-cuda.patch
 
 # Compile FFmpeg
 # We use variables to ensure shell quoting is handled cleanly.
@@ -58,7 +63,8 @@ RUN cd ffmpeg-7.1.3 && \
         --enable-nvenc \
         --enable-nvdec \
         --extra-cflags="-I/usr/local/cuda/include" \
-        --extra-ldflags="-L/usr/local/cuda/lib64" \
+        --extra-ldflags="-L/usr/local/cuda/lib64 -Wl,-rpath,/usr/local/cuda/lib64" \
+        --extra-libs="-lcudart" \
         --nvccflags="$NVCC_FLAGS" \
         --disable-doc \
         --disable-static \
