@@ -25,8 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cuda-libraries-dev-13-0 \
     cuda-cudart-dev-13-0 \
     cuda-nvcc-13-0 \
-    && apt-cache search cuda | grep headers && \
-    rm -rf /var/lib/apt/lists/*
+    cuda-headers-13-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install nv-codec-headers
 RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
