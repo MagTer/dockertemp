@@ -38,12 +38,17 @@ jobs:
 
       - name: Verify CUDA Filters Presence
         # We expect the filters to be listed even if hardware is missing.
-        # If grep fails, the build is considered broken.
+        # Cache the filter list so we can report it if a check fails.
         run: |
-          echo "Checking for tonemap_cuda..."
-          docker run --rm ffmpeg-cuda:test -filters | grep tonemap_cuda
-          echo "Checking for scale_npp..."
-          docker run --rm ffmpeg-cuda:test -filters | grep scale_npp
+          filters=$(docker run --rm ffmpeg-cuda:test -filters)
+          for filter in tonemap_cuda scale_npp; do
+            echo "Checking for $filter..."
+            if ! echo "$filters" | grep -Fq "$filter"; then
+              echo "Missing $filter in filter list:"
+              echo "$filters"
+              exit 1
+            fi
+          done
 
       - name: Verify NVENC Encoder Presence
         run: |
