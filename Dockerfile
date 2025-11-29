@@ -1,4 +1,4 @@
-# Stage 1: Build
+# Stage 1: Build image
 FROM nvidia/cuda:13.0.2-devel-ubuntu24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
