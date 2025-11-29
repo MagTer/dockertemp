@@ -25,7 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cuda-libraries-dev-13-0 \
     cuda-cudart-dev-13-0 \
     cuda-nvcc-13-0 \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-cache search cuda | grep headers && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install nv-codec-headers
 RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
@@ -45,6 +46,7 @@ RUN wget -O ffmpeg.tar.bz2 https://ffmpeg.org/releases/ffmpeg-7.1.3.tar.bz2 && \
 RUN cd ffmpeg-7.1.3 && \
     nvcc --version && \
     ls -l /usr/local/cuda/include/npp.h && \
+    (ls -l /usr/local/cuda/include/cuda.h || echo "cuda.h not found") && \
     NVCC_FLAGS="-gencode arch=compute_75,code=sm_75 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -O2 -allow-unsupported-compiler" && \
     ./configure \
         --prefix=/usr/local \
@@ -60,7 +62,7 @@ RUN cd ffmpeg-7.1.3 && \
         --nvccflags="$NVCC_FLAGS" \
         --disable-doc \
         --disable-static \
-        --enable-shared && \
+        --enable-shared || (cat ffbuild/config.log && exit 1) && \
     make -j$(nproc) && \
     make install
 
