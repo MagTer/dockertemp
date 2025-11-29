@@ -22,10 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6-dev \
     unzip \
     ca-certificates \
-    cuda-libraries-dev-13-0 \
-    cuda-cudart-dev-13-0 \
-    cuda-nvcc-13-0 \
-    cuda-headers-13-0 \
+    cuda-toolkit-13-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install nv-codec-headers

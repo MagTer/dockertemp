@@ -2,7 +2,7 @@ name: Build and Test FFmpeg CUDA Image
 
 on:
   push:
-    branches: [ "master", "main*", "feature*" ]
+    branches: [ "master", "main", "feature*" ]
   pull_request:
     branches: [ "master", "main" ]
 
