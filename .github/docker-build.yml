@@ -1,0 +1,51 @@
+name: Build and Test FFmpeg CUDA Image
+
+on:
+  push:
+    branches: [ "master", "main", "feature*" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ffmpeg-cuda:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Inspect Image
+        run: docker image inspect ffmpeg-cuda:test
+
+      - name: Verify FFmpeg Configuration
+        run: |
+          docker run --rm ffmpeg-cuda:test -version | grep "enable-cuda-nvcc"
+          docker run --rm ffmpeg-cuda:test -version | grep "enable-libnpp"
+          docker run --rm ffmpeg-cuda:test -version | grep "enable-nvenc"
+
+      - name: Verify CUDA Filters Presence
+        # We expect the filters to be listed even if hardware is missing.
+        # If grep fails, the build is considered broken.
+        run: |
+          echo "Checking for tonemap_cuda..."
+          docker run --rm ffmpeg-cuda:test -filters | grep tonemap_cuda
+          echo "Checking for scale_npp..."
+          docker run --rm ffmpeg-cuda:test -filters | grep scale_npp
+
+      - name: Verify NVENC Encoder Presence
+        run: |
+          echo "Checking for h264_nvenc..."
+          docker run --rm ffmpeg-cuda:test -encoders | grep h264_nvenc
